@@ -836,13 +836,20 @@ type dcAwareRR struct {
 	localHosts      cowHostList
 	remoteHosts     cowHostList
 	lastUsedHostIdx uint64
+	strict          bool
 }
 
 // DCAwareRoundRobinPolicy is a host selection policies which will prioritize and
 // return hosts which are in the local datacentre before returning hosts in all
 // other datercentres
 func DCAwareRoundRobinPolicy(localDC string) HostSelectionPolicy {
-	return &dcAwareRR{local: localDC}
+	return &dcAwareRR{local: localDC, strict: false}
+}
+
+// StrictDCAwareRoundRobinPolicy is a host selection policies which will
+// return hosts from the local data centre and does not fall back to hosts in other data centres
+func StrictDCAwareRoundRobinPolicy(localDC string) HostSelectionPolicy {
+	return &dcAwareRR{local: localDC, strict: true}
 }
 
 func (d *dcAwareRR) Init(*Session)                       {}
@@ -856,7 +863,7 @@ func (d *dcAwareRR) IsLocal(host *HostInfo) bool {
 func (d *dcAwareRR) AddHost(host *HostInfo) {
 	if d.IsLocal(host) {
 		d.localHosts.add(host)
-	} else {
+	} else if !d.strict {
 		d.remoteHosts.add(host)
 	}
 }
@@ -864,7 +871,7 @@ func (d *dcAwareRR) AddHost(host *HostInfo) {
 func (d *dcAwareRR) RemoveHost(host *HostInfo) {
 	if d.IsLocal(host) {
 		d.localHosts.remove(host.ConnectAddress())
-	} else {
+	} else if !d.strict {
 		d.remoteHosts.remove(host.ConnectAddress())
 	}
 }
@@ -916,7 +923,12 @@ func roundRobbin(shift int, hosts ...[]*HostInfo) NextHost {
 
 func (d *dcAwareRR) Pick(q ExecutableQuery) NextHost {
 	nextStartOffset := atomic.AddUint64(&d.lastUsedHostIdx, 1)
-	return roundRobbin(int(nextStartOffset), d.localHosts.get(), d.remoteHosts.get())
+
+	if !d.strict {
+		return roundRobbin(int(nextStartOffset), d.localHosts.get(), d.remoteHosts.get())
+	}
+
+	return roundRobbin(int(nextStartOffset), d.localHosts.get())
 }
 
 // RackAwareRoundRobinPolicy is a host selection policies which will prioritize and
