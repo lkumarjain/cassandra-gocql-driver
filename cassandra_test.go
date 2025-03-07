@@ -32,7 +32,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
 	"math"
 	"math/big"
@@ -44,6 +43,8 @@ import (
 	"testing"
 	"time"
 	"unicode"
+
+	"github.com/stretchr/testify/require"
 
 	"gopkg.in/inf.v0"
 )
@@ -476,7 +477,7 @@ func TestCAS(t *testing.T) {
 	if applied, _, err := session.ExecuteBatchCAS(successBatch, &titleCAS, &revidCAS, &modifiedCAS); err != nil {
 		t.Fatal("insert:", err)
 	} else if applied {
-		t.Fatalf("insert should have been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
+		t.Fatalf("insert should have not been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
 	}
 
 	insertBatch := session.Batch(LoggedBatch)
@@ -492,7 +493,7 @@ func TestCAS(t *testing.T) {
 	if applied, iter, err := session.ExecuteBatchCAS(failBatch, &titleCAS, &revidCAS, &modifiedCAS); err != nil {
 		t.Fatal("insert:", err)
 	} else if applied {
-		t.Fatalf("insert should have been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
+		t.Fatalf("insert should have not been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
 	} else {
 		if scan := iter.Scan(&applied, &titleCAS, &revidCAS, &modifiedCAS); scan && applied {
 			t.Fatalf("insert should have been applied: title=%v revID=%v modified=%v", titleCAS, revidCAS, modifiedCAS)
@@ -502,6 +503,55 @@ func TestCAS(t *testing.T) {
 		if err := iter.Close(); err != nil {
 			t.Fatal("scan:", err)
 		}
+	}
+
+	casMap = make(map[string]interface{})
+	if applied, err := session.Query(`SELECT revid FROM cas_table WHERE title = ?`,
+		title+"_foo").MapScanCAS(casMap); err != nil {
+		t.Fatal("select:", err)
+	} else if applied {
+		t.Fatal("select shouldn't have returned applied")
+	}
+
+	if _, err := session.Query(`SELECT revid FROM cas_table WHERE title = ?`,
+		title+"_foo").ScanCAS(&revidCAS); err == nil {
+		t.Fatal("select: should have returned an error")
+	}
+
+	notCASBatch := session.Batch(LoggedBatch)
+	notCASBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES (?, ?, ?)", title+"_baz", revid, modified)
+	casMap = make(map[string]interface{})
+	if _, _, err := session.MapExecuteBatchCAS(notCASBatch, casMap); err != ErrNotFound {
+		t.Fatal("insert should have returned not found:", err)
+	}
+
+	notCASBatch = session.Batch(LoggedBatch)
+	notCASBatch.Query("INSERT INTO cas_table (title, revid, last_modified) VALUES (?, ?, ?)", title+"_baz", revid, modified)
+	casMap = make(map[string]interface{})
+	if _, _, err := session.ExecuteBatchCAS(notCASBatch, &revidCAS); err != ErrNotFound {
+		t.Fatal("insert should have returned not found:", err)
+	}
+
+	failBatch = session.Batch(LoggedBatch)
+	failBatch.Query("UPDATE cas_table SET last_modified = DATEOF(NOW()) WHERE title='_foo' AND revid=3e4ad2f1-73a4-11e5-9381-29463d90c3f0 IF last_modified = ?", modified)
+	if _, _, err := session.ExecuteBatchCAS(failBatch, new(bool)); err == nil {
+		t.Fatal("update should have errored")
+	}
+	// make sure MapScanCAS does not panic when MapScan fails
+	casMap = make(map[string]interface{})
+	casMap["last_modified"] = false
+	if _, err := session.Query(`UPDATE cas_table SET last_modified = DATEOF(NOW()) WHERE title='_foo' AND revid=3e4ad2f1-73a4-11e5-9381-29463d90c3f0 IF last_modified = ?`,
+		modified).MapScanCAS(casMap); err == nil {
+		t.Fatal("update should hvae errored", err)
+	}
+
+	// make sure MapExecuteBatchCAS does not panic when MapScan fails
+	failBatch = session.Batch(LoggedBatch)
+	failBatch.Query("UPDATE cas_table SET last_modified = DATEOF(NOW()) WHERE title='_foo' AND revid=3e4ad2f1-73a4-11e5-9381-29463d90c3f0 IF last_modified = ?", modified)
+	casMap = make(map[string]interface{})
+	casMap["last_modified"] = false
+	if _, _, err := session.MapExecuteBatchCAS(failBatch, casMap); err == nil {
+		t.Fatal("update should have errored")
 	}
 }
 
@@ -910,6 +960,7 @@ func TestMapScan(t *testing.T) {
 			fullname       text PRIMARY KEY,
 			age            int,
 			address        inet,
+			data           blob,
 		)`); err != nil {
 		t.Fatal("create table:", err)
 	}
@@ -918,8 +969,8 @@ func TestMapScan(t *testing.T) {
 		"Grace Hopper", 31, net.ParseIP("10.0.0.1")).Exec(); err != nil {
 		t.Fatal("insert:", err)
 	}
-	if err := session.Query(`INSERT INTO scan_map_table (fullname, age, address) values (?,?,?)`,
-		"Ada Lovelace", 30, net.ParseIP("10.0.0.2")).Exec(); err != nil {
+	if err := session.Query(`INSERT INTO scan_map_table (fullname, age, address, data) values (?,?,?,?)`,
+		"Ada Lovelace", 30, net.ParseIP("10.0.0.2"), []byte(`{"foo": "bar"}`)).Exec(); err != nil {
 		t.Fatal("insert:", err)
 	}
 
@@ -933,6 +984,7 @@ func TestMapScan(t *testing.T) {
 	assertEqual(t, "fullname", "Ada Lovelace", row["fullname"])
 	assertEqual(t, "age", 30, row["age"])
 	assertEqual(t, "address", "10.0.0.2", row["address"])
+	assertDeepEqual(t, "data", []byte(`{"foo": "bar"}`), row["data"])
 
 	// Second iteration using a new map
 	row = make(map[string]interface{})
@@ -942,6 +994,7 @@ func TestMapScan(t *testing.T) {
 	assertEqual(t, "fullname", "Grace Hopper", row["fullname"])
 	assertEqual(t, "age", 31, row["age"])
 	assertEqual(t, "address", "10.0.0.1", row["address"])
+	assertDeepEqual(t, "data", []byte(nil), row["data"])
 }
 
 func TestSliceMap(t *testing.T) {
@@ -2273,48 +2326,9 @@ func TestGetColumnMetadata(t *testing.T) {
 	}
 }
 
-func TestViewMetadata(t *testing.T) {
-	session := createSession(t)
-	defer session.Close()
-	createViews(t, session)
-
-	views, err := getViewsMetadata(session, "gocql_test")
-	if err != nil {
-		t.Fatalf("failed to query view metadata with err: %v", err)
-	}
-	if views == nil {
-		t.Fatal("failed to query view metadata, nil returned")
-	}
-
-	if len(views) != 1 {
-		t.Fatal("expected one view")
-	}
-
-	textType := TypeText
-	if flagCassVersion.Before(3, 0, 0) {
-		textType = TypeVarchar
-	}
-
-	expectedView := ViewMetadata{
-		Keyspace:   "gocql_test",
-		Name:       "basicview",
-		FieldNames: []string{"birthday", "nationality", "weight", "height"},
-		FieldTypes: []TypeInfo{
-			NativeType{typ: TypeTimestamp},
-			NativeType{typ: textType},
-			NativeType{typ: textType},
-			NativeType{typ: textType},
-		},
-	}
-
-	if !reflect.DeepEqual(views[0], expectedView) {
-		t.Fatalf("view is %+v, but expected %+v", views[0], expectedView)
-	}
-}
-
 func TestMaterializedViewMetadata(t *testing.T) {
 	if flagCassVersion.Before(3, 0, 0) {
-		return
+		t.Skip("The Cassandra version is too old")
 	}
 	session := createSession(t)
 	defer session.Close()
@@ -2333,14 +2347,19 @@ func TestMaterializedViewMetadata(t *testing.T) {
 	expectedChunkLengthInKB := "16"
 	expectedDCLocalReadRepairChance := float64(0)
 	expectedSpeculativeRetry := "99p"
+	expectedAdditionalWritePolicy := "99p"
+	expectedReadRepair := "BLOCKING"
 	if flagCassVersion.Before(4, 0, 0) {
 		expectedChunkLengthInKB = "64"
 		expectedDCLocalReadRepairChance = 0.1
 		expectedSpeculativeRetry = "99PERCENTILE"
+		expectedReadRepair = ""
+		expectedAdditionalWritePolicy = ""
 	}
 	expectedView1 := MaterializedViewMetadata{
 		Keyspace:                "gocql_test",
 		Name:                    "view_view",
+		AdditionalWritePolicy:   expectedAdditionalWritePolicy,
 		baseTableName:           "view_table",
 		BloomFilterFpChance:     0.01,
 		Caching:                 map[string]string{"keys": "ALL", "rows_per_partition": "NONE"},
@@ -2352,12 +2371,17 @@ func TestMaterializedViewMetadata(t *testing.T) {
 		DefaultTimeToLive:       0,
 		Extensions:              map[string]string{},
 		GcGraceSeconds:          864000,
-		IncludeAllColumns:       false, MaxIndexInterval: 2048, MemtableFlushPeriodInMs: 0, MinIndexInterval: 128, ReadRepairChance: 0,
-		SpeculativeRetry: expectedSpeculativeRetry,
+		IncludeAllColumns:       false, MaxIndexInterval: 2048,
+		MemtableFlushPeriodInMs: 0,
+		MinIndexInterval:        128,
+		ReadRepair:              expectedReadRepair,
+		ReadRepairChance:        0,
+		SpeculativeRetry:        expectedSpeculativeRetry,
 	}
 	expectedView2 := MaterializedViewMetadata{
 		Keyspace:                "gocql_test",
 		Name:                    "view_view2",
+		AdditionalWritePolicy:   expectedAdditionalWritePolicy,
 		baseTableName:           "view_table2",
 		BloomFilterFpChance:     0.01,
 		Caching:                 map[string]string{"keys": "ALL", "rows_per_partition": "NONE"},
@@ -2369,8 +2393,13 @@ func TestMaterializedViewMetadata(t *testing.T) {
 		DefaultTimeToLive:       0,
 		Extensions:              map[string]string{},
 		GcGraceSeconds:          864000,
-		IncludeAllColumns:       false, MaxIndexInterval: 2048, MemtableFlushPeriodInMs: 0, MinIndexInterval: 128, ReadRepairChance: 0,
-		SpeculativeRetry: expectedSpeculativeRetry,
+		IncludeAllColumns:       false,
+		MaxIndexInterval:        2048,
+		MemtableFlushPeriodInMs: 0,
+		MinIndexInterval:        128,
+		ReadRepair:              expectedReadRepair,
+		ReadRepairChance:        0,
+		SpeculativeRetry:        expectedSpeculativeRetry,
 	}
 
 	expectedView1.BaseTableId = materializedViews[0].BaseTableId
@@ -2593,11 +2622,6 @@ func TestKeyspaceMetadata(t *testing.T) {
 	}
 	if aggregate.StateFunc.Name != "avgstate" {
 		t.Fatalf("expected state function %s, but got %s", "avgstate", aggregate.StateFunc.Name)
-	}
-
-	_, found = keyspaceMetadata.Views["basicview"]
-	if !found {
-		t.Fatal("failed to find the view in metadata")
 	}
 	_, found = keyspaceMetadata.UserTypes["basicview"]
 	if !found {
@@ -3303,7 +3327,6 @@ func TestUnsetColBatch(t *testing.T) {
 	}
 	var id, mInt, count int
 	var mText string
-
 	if err := session.Query("SELECT count(*) FROM gocql_test.batchUnsetInsert;").Scan(&count); err != nil {
 		t.Fatalf("Failed to select with err: %v", err)
 	} else if count != 2 {
@@ -3336,5 +3359,54 @@ func TestQuery_NamedValues(t *testing.T) {
 	var value string
 	if err := session.Query("SELECT VALUE from gocql_test.named_query WHERE id = :id", NamedValue("id", 1)).Scan(&value); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// This test ensures that queries are sent to the specified host only
+func TestQuery_SetHostID(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	hosts := session.GetHosts()
+
+	const iterations = 5
+	for _, expectedHost := range hosts {
+		for i := 0; i < iterations; i++ {
+			var actualHostID string
+			err := session.Query("SELECT host_id FROM system.local").
+				SetHostID(expectedHost.HostID()).
+				Scan(&actualHostID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if expectedHost.HostID() != actualHostID {
+				t.Fatalf("Expected query to be executed on host %s, but it was executed on %s",
+					expectedHost.HostID(),
+					actualHostID,
+				)
+			}
+		}
+	}
+
+	// ensuring properly handled invalid host id
+	err := session.Query("SELECT host_id FROM system.local").
+		SetHostID("[invalid]").
+		Exec()
+	if !errors.Is(err, ErrNoConnections) {
+		t.Fatalf("Expected error to be: %v, but got %v", ErrNoConnections, err)
+	}
+
+	// ensuring that the driver properly handles the case
+	// when specified host for the query is down
+	host := hosts[0]
+	pool, _ := session.pool.getPoolByHostID(host.HostID())
+	// simulating specified host is down
+	pool.host.setState(NodeDown)
+	err = session.Query("SELECT host_id FROM system.local").
+		SetHostID(host.HostID()).
+		Exec()
+	if !errors.Is(err, ErrNoConnections) {
+		t.Fatalf("Expected error to be: %v, but got %v", ErrNoConnections, err)
 	}
 }

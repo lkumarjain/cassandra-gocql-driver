@@ -35,8 +35,10 @@ import (
 	"time"
 )
 
-var ErrCannotFindHost = errors.New("cannot find host")
-var ErrHostAlreadyExists = errors.New("host already exists")
+var (
+	ErrCannotFindHost    = errors.New("cannot find host")
+	ErrHostAlreadyExists = errors.New("host already exists")
+)
 
 type nodeState int32
 
@@ -56,6 +58,7 @@ const (
 
 type cassVersion struct {
 	Major, Minor, Patch int
+	Qualifier           string
 }
 
 func (c *cassVersion) Set(v string) error {
@@ -87,13 +90,30 @@ func (c *cassVersion) unmarshal(data []byte) error {
 
 	c.Minor, err = strconv.Atoi(v[1])
 	if err != nil {
-		return fmt.Errorf("invalid minor version %v: %v", v[1], err)
+		vMinor := strings.Split(v[1], "-")
+		if len(vMinor) < 2 {
+			return fmt.Errorf("invalid minor version %v: %v", v[1], err)
+		}
+		c.Minor, err = strconv.Atoi(vMinor[0])
+		if err != nil {
+			return fmt.Errorf("invalid minor version %v: %v", v[1], err)
+		}
+		c.Qualifier = v[1][strings.Index(v[1], "-")+1:]
+		return nil
 	}
 
 	if len(v) > 2 {
 		c.Patch, err = strconv.Atoi(v[2])
 		if err != nil {
-			return fmt.Errorf("invalid patch version %v: %v", v[2], err)
+			vPatch := strings.Split(v[2], "-")
+			if len(vPatch) < 2 {
+				return fmt.Errorf("invalid patch version %v: %v", v[2], err)
+			}
+			c.Patch, err = strconv.Atoi(vPatch[0])
+			if err != nil {
+				return fmt.Errorf("invalid patch version %v: %v", v[2], err)
+			}
+			c.Qualifier = v[2][strings.Index(v[2], "-")+1:]
 		}
 	}
 
@@ -111,7 +131,6 @@ func (c cassVersion) Before(major, minor, patch int) bool {
 		} else if c.Minor == minor && c.Patch < patch {
 			return true
 		}
-
 	}
 	return false
 }
@@ -121,6 +140,9 @@ func (c cassVersion) AtLeast(major, minor, patch int) bool {
 }
 
 func (c cassVersion) String() string {
+	if c.Qualifier != "" {
+		return fmt.Sprintf("%d.%d.%d-%v", c.Major, c.Minor, c.Patch, c.Qualifier)
+	}
 	return fmt.Sprintf("v%d.%d.%d", c.Major, c.Minor, c.Patch)
 }
 
@@ -159,6 +181,18 @@ type HostInfo struct {
 	tokens           []string
 }
 
+func newHostInfo(addr net.IP, port int) (*HostInfo, error) {
+	if !validIpAddr(addr) {
+		return nil, errors.New("invalid host address")
+	}
+	host := &HostInfo{}
+	host.hostname = addr.String()
+	host.port = port
+
+	host.connectAddress = addr
+	return host, nil
+}
+
 func (h *HostInfo) Equal(host *HostInfo) bool {
 	if h == host {
 		// prevent rlock reentry
@@ -191,14 +225,12 @@ func (h *HostInfo) connectAddressLocked() (net.IP, string) {
 	} else if validIpAddr(h.rpcAddress) {
 		return h.rpcAddress, "rpc_adress"
 	} else if validIpAddr(h.preferredIP) {
-		// where does perferred_ip get set?
 		return h.preferredIP, "preferred_ip"
 	} else if validIpAddr(h.broadcastAddress) {
 		return h.broadcastAddress, "broadcast_address"
-	} else if validIpAddr(h.peer) {
-		return h.peer, "peer"
 	}
-	return net.IPv4zero, "invalid"
+	return h.peer, "peer"
+
 }
 
 // nodeToNodeAddress returns address broadcasted between node to nodes.
@@ -218,24 +250,13 @@ func (h *HostInfo) nodeToNodeAddress() net.IP {
 }
 
 // Returns the address that should be used to connect to the host.
-// If you wish to override this, use an AddressTranslator or
-// use a HostFilter to SetConnectAddress()
+// If you wish to override this, use an AddressTranslator
 func (h *HostInfo) ConnectAddress() net.IP {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if addr, _ := h.connectAddressLocked(); validIpAddr(addr) {
-		return addr
-	}
-	panic(fmt.Sprintf("no valid connect address for host: %v. Is your cluster configured correctly?", h))
-}
-
-func (h *HostInfo) SetConnectAddress(address net.IP) *HostInfo {
-	// TODO(zariel): should this not be exported?
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.connectAddress = address
-	return h
+	addr, _ := h.connectAddressLocked()
+	return addr
 }
 
 func (h *HostInfo) BroadcastAddress() net.IP {
@@ -439,7 +460,7 @@ func (h *HostInfo) String() string {
 	connectAddr, source := h.connectAddressLocked()
 	return fmt.Sprintf("[HostInfo hostname=%q connectAddress=%q peer=%q rpc_address=%q broadcast_address=%q "+
 		"preferred_ip=%q connect_addr=%q connect_addr_source=%q "+
-		"port=%d data_centre=%q rack=%q host_id=%q version=%q state=%s num_tokens=%d]",
+		"port=%d data_center=%q rack=%q host_id=%q version=%q state=%s num_tokens=%d]",
 		h.hostname, h.connectAddress, h.peer, h.rpcAddress, h.broadcastAddress, h.preferredIP,
 		connectAddr, source,
 		h.port, h.dataCenter, h.rack, h.hostId, h.version, h.state, len(h.tokens))
@@ -467,6 +488,10 @@ func checkSystemSchema(control *controlConn) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func (s *Session) newHostInfoFromMap(addr net.IP, port int, row map[string]interface{}) (*HostInfo, error) {
+	return s.hostInfoFromMap(row, &HostInfo{connectAddress: addr, port: port})
 }
 
 // Given a map that represents a row from either system.local or system.peers
@@ -584,6 +609,9 @@ func (s *Session) hostInfoFromMap(row map[string]interface{}, host *HostInfo) (*
 	}
 
 	ip, port := s.cfg.translateAddressPort(host.ConnectAddress(), host.port)
+	if !validIpAddr(ip) {
+		return nil, fmt.Errorf("invalid host address (before translation: %v:%v, after translation: %v:%v)", host.ConnectAddress(), host.port, ip.String(), port)
+	}
 	host.connectAddress = ip
 	host.port = port
 
@@ -601,7 +629,7 @@ func (s *Session) hostInfoFromIter(iter *Iter, connectAddress net.IP, defaultPor
 		return nil, errors.New("query returned 0 rows")
 	}
 
-	host, err := s.hostInfoFromMap(rows[0], &HostInfo{connectAddress: connectAddress, port: defaultPort})
+	host, err := s.newHostInfoFromMap(connectAddress, defaultPort, rows[0])
 	if err != nil {
 		return nil, err
 	}
@@ -652,7 +680,7 @@ func (r *ringDescriber) getClusterPeerInfo(localHost *HostInfo) ([]*HostInfo, er
 
 	for _, row := range rows {
 		// extract all available info about the peer
-		host, err := r.session.hostInfoFromMap(row, &HostInfo{port: r.session.cfg.Port})
+		host, err := r.session.newHostInfoFromMap(nil, r.session.cfg.Port, row)
 		if err != nil {
 			return nil, err
 		} else if !isValidPeer(host) {

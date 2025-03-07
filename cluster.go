@@ -198,7 +198,7 @@ type ClusterConfig struct {
 	// If DisableInitialHostLookup then the driver will not attempt to get host info
 	// from the system.peers table, this will mean that the driver will connect to
 	// hosts supplied and will not attempt to lookup the hosts information, this will
-	// mean that data_centre, rack and token information will not be available and as
+	// mean that data_center, rack and token information will not be available and as
 	// such host filtering and token aware query routing will not be available.
 	DisableInitialHostLookup bool
 
@@ -260,7 +260,7 @@ type ClusterConfig struct {
 	HostDialer HostDialer
 
 	// Logger for this ClusterConfig.
-	// If not specified, defaults to the global gocql.Logger.
+	// If not specified, defaults to the gocql.defaultLogger.
 	Logger StdLogger
 
 	// internal config for testing
@@ -304,7 +304,7 @@ func NewCluster(hosts ...string) *ClusterConfig {
 
 func (cfg *ClusterConfig) logger() StdLogger {
 	if cfg.Logger == nil {
-		return Logger
+		return &defaultLogger{}
 	}
 	return cfg.Logger
 }

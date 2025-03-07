@@ -1,4 +1,5 @@
 # Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -8,9 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support of sending queries to the specific node with Query.SetHostID() (CASSGO-4)
+
 ### Changed
 
+- Move lz4 compressor to lz4 package within the gocql module (CASSGO-32)
+
 - Don't restrict server authenticator unless PasswordAuthentictor.AllowedAuthenticators is provided (CASSGO-19)
+
+- Cleanup of deprecated elements (CASSGO-12)
 
 - Remove global NewBatch function (CASSGO-15)
 
@@ -18,10 +25,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Change Batch API to be consistent with Query() (CASSGO-7)
 
+- Added Cassandra 4.0 table options support(CASSGO-13)
+
+- Remove deprecated global logger (CASSGO-24)
+
+- Bumped actions/upload-artifact and actions/cache versions to v4 in CI workflow (CASSGO-48)
+
+- Keep nil slices in MapScan (CASSGO-44)
+
+- Improve error messages for marshalling (CASSGO-38)
+
+- Remove HostPoolHostPolicy from gocql package (CASSGO-21)
+
+- Standardized spelling of datacenter (CASSGO-35)
+
+- Refactor HostInfo creation and ConnectAddress() method (CASSGO-45)
+
 ### Fixed
+- Cassandra version unmarshal fix (CASSGO-49)
 
 - Retry policy now takes into account query idempotency (CASSGO-27)
+
 - Don't return error to caller with RetryType Ignore (CASSGO-28)
+- The marshalBigInt return 8 bytes slice in all cases except for big.Int,
+  which returns a variable length slice, but should be 8 bytes slice as well (CASSGO-2)
+
+- Skip metadata only if the prepared result includes metadata (CASSGO-40)
+
+- Don't panic in MapExecuteBatchCAS if no `[applied]` column is returned (CASSGO-42)
 
 ## [1.7.0] - 2024-09-23
 
